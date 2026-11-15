@@ -1,7 +1,0 @@
-Timestamp,Peer_Name,Attempt,Level1_Linear_MSE,Level2_Outlier_Test_MSE,Level3_Logistic_LogLoss,Total_Score,What_Concept_Was_Discovered_Feedback
-2026-11-15 21:10,Peer_Tester_1,Attempt 1,1.84,2.45,0.68,185,"At first I only changed the intercept and my residual lines were huge."
-2026-11-15 21:18,Peer_Tester_1,Attempt 2,0.52,0.61,0.31,278,"Adjusting slope (m) and intercept (c) together minimized the squared error much faster."
-2026-11-15 21:30,Peer_Tester_2,Attempt 1,1.42,3.10,0.59,192,"High polynomial degree gave low training error in Level 2 but ruined the test error (overfitting)."
-2026-11-15 21:39,Peer_Tester_2,Attempt 2,0.49,0.55,0.29,284,"Removing the extreme outliers and keeping degree=1 fixed the regression line."
-2026-11-15 21:50,Peer_Tester_3,Attempt 1,1.15,1.90,0.74,205,"Linear regression predicted probabilities above 1 and below 0 on binary data."
-2026-11-15 21:58,Peer_Tester_3,Attempt 2,0.47,0.58,0.27,289,"Using the Sigmoid curve and shifting the 0.5 probability threshold separated the two classes cleanly."
