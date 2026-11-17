@@ -72,6 +72,37 @@ WORLDS = [
          ground=("#3a37a0", "#14123a"), brick=("#5a3cc4", "#2c1c78"), accent="#4ff0ff"),
 ]
 
+# Explicit, measurable learning objectives (shown in the lesson panel, tutorial and README)
+LEARNING_OBJECTIVES = [
+    ["Name the independent (X) and dependent (Y) variable in a scenario.",
+     "Collect data points, then PREDICT a new one from the pattern you found.",
+     "Recognise a positive linear relationship."],
+    ["Explain the intercept c as the value of Y when X = 0.",
+     "Explain the slope m as the change in Y for every +1 in X.",
+     "Fit a line by choosing m and c."],
+    ["Compute residuals and MSE and explain why residuals are squared.",
+     "Find the OLS line from data and know it has the smallest possible MSE.",
+     "Run gradient descent and see how the learning rate decides between converging and diverging."],
+    ["Use a fitted model to predict an unseen X (extrapolation).",
+     "Explain why uncertainty grows the further we predict beyond the training data."],
+]
+
+# (question, options, index of the correct option) - used for the pre/post check-up
+CHECK_QUESTIONS = [
+    ("In y = m*x + c, what does c tell you?",
+     ["The predicted Y when X = 0", "How steep the line is", "The average error", "The largest X in the data"], 0),
+    ("What is a residual?",
+     ["Actual y minus predicted y", "The slope of the line", "The learning rate", "The mean of x"], 0),
+    ("Why are residuals squared when computing MSE?",
+     ["So errors cannot cancel out and big misses count more", "To make the line steeper",
+      "To remove the intercept", "Because Y is always squared"], 0),
+    ("During gradient descent the MSE explodes instead of shrinking. The most likely cause is...",
+     ["A learning rate that is too large", "Too few data points", "A positive slope", "X and Y being swapped"], 0),
+    ("Predicting Y for an X far beyond all your training data is called...",
+     ["Extrapolation - and it is riskier than predicting inside the data", "Interpolation - and it is always exact",
+      "Regression - and it is impossible", "A residual - and it is harmless"], 0),
+]
+
 FONTS = {}
 
 
@@ -254,7 +285,7 @@ class HistoryStore:
     @staticmethod
     def default():
         return {"version": 1, "games_started": 0, "stages_completed": 0, "victories": 0,
-                "defeats": 0, "best_mse": None, "best_gap": None, "attempts": []}
+                "defeats": 0, "best_mse": None, "best_gap": None, "attempts": [], "evidence": []}
 
     def _pick_path(self):
         cands = []
@@ -294,6 +325,9 @@ class HistoryStore:
             if not isinstance(base["attempts"], list):
                 base["attempts"] = []
             base["attempts"] = [a for a in base["attempts"] if isinstance(a, dict)]
+            if not isinstance(base["evidence"], list):
+                base["evidence"] = []
+            base["evidence"] = [e for e in base["evidence"] if isinstance(e, dict)]
             self.data = base
         except (OSError, ValueError, TypeError) as exc:
             self.error = f"History file unreadable ({exc}); starting a fresh one."
@@ -330,6 +364,21 @@ class HistoryStore:
             d["best_mse"] = mse
         if d["best_gap"] is None or gap < d["best_gap"]:
             d["best_gap"] = gap
+
+    def add_evidence(self, entry):
+        """Store one check-up / feedback record (kept across games, older history files stay valid)."""
+        ev = self.data.setdefault("evidence", [])
+        ev.append(entry)
+        del ev[:-500]
+        self.save()
+
+    def evidence_summary(self):
+        st = evidence_stats(self.data.get("evidence", []))
+        if not st["pairs"]:
+            return []
+        t = st["pairs"][0]["total"]
+        return [f"Check-ups: {len(st['pairs'])} paired; average score {st['mean_pre']:.1f}/{t} before -> "
+                f"{st['mean_post']:.1f}/{t} after ({st['mean_gain']:+.1f})"]
 
     # ----- reporting / adaptation -----
     def _ratios(self):
@@ -370,6 +419,7 @@ class HistoryStore:
                 ch = (old - new) / old * 100
                 lines.append(f"Improvement: your fits are {abs(ch):.0f}% "
                              f"{'closer to' if ch >= 0 else 'further from'} OLS than your early attempts.")
+        lines += self.evidence_summary()[:1]
         return lines
 
     def adapt_profile(self):
@@ -392,6 +442,62 @@ class HistoryStore:
             iter_factor = 1.5
             note += " Droid: your last run had not converged, so more iterations are suggested."
         return dict(sigma_factor=sigma_factor, iter_factor=iter_factor, note=note)
+
+
+def evidence_stats(entries):
+    """Pair pre/post check-ups by play session and summarise learning gain and feedback."""
+    pre, post = {}, {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        key = e.get("session") or id(e)
+        if e.get("kind") == "pre":
+            pre[key] = e
+        elif e.get("kind") == "post":
+            post[key] = e
+    pairs = []
+    for k, po in post.items():
+        pr = pre.get(k)
+        if pr is not None:
+            pairs.append(dict(player=po.get("player") or pr.get("player") or "anon", pre=pr.get("score", 0),
+                              post=po.get("score", 0), total=po.get("total", len(CHECK_QUESTIONS)),
+                              rating=po.get("rating"), comment=po.get("comment", ""),
+                              stages=po.get("stages_cleared"), victory=po.get("victory")))
+
+    def mean(v):
+        return sum(v) / len(v) if v else None
+
+    return dict(pairs=pairs, n_pre=len(pre), n_post=len(post),
+                mean_pre=mean([p["pre"] for p in pairs]), mean_post=mean([p["post"] for p in pairs]),
+                mean_gain=mean([p["post"] - p["pre"] for p in pairs]),
+                mean_rating=mean([p["rating"] for p in pairs if p["rating"]]),
+                post_only=[po for k, po in post.items() if k not in pre])
+
+
+def build_report(paths):
+    """Markdown playtest-evidence table built from one or more history JSON files (python game.py --report a.json b.json)."""
+    entries, notes = [], []
+    for p in paths:
+        try:
+            d = json.loads(Path(p).read_text(encoding="utf-8"))
+            entries += [e for e in d.get("evidence", []) if isinstance(e, dict)]
+        except (OSError, ValueError, AttributeError) as exc:
+            notes.append(f"Could not read {p}: {exc}")
+    st = evidence_stats(entries)
+    out = ["# Playtest evidence (generated by --report)", ""]
+    out += [f"> {n}" for n in notes]
+    if not st["pairs"]:
+        out.append("No paired warm-up/check-up results found yet. Ask players to press K before and after playing.")
+        return "\n".join(out)
+    t = st["pairs"][0]["total"]
+    out += ["| Player | Before | After | Gain | Rating (1-5) | Comment |", "|---|---|---|---|---|---|"]
+    for p in st["pairs"]:
+        out.append(f"| {p['player']} | {p['pre']}/{t} | {p['post']}/{t} | {p['post'] - p['pre']:+d} | "
+                   f"{p['rating'] if p['rating'] else '-'} | {(p['comment'] or '-').replace('|', '/')} |")
+    out += ["", f"Players with paired results: {len(st['pairs'])}",
+            f"Mean score before: {st['mean_pre']:.2f}/{t}   after: {st['mean_post']:.2f}/{t}   mean gain: {st['mean_gain']:+.2f}",
+            f"Mean usefulness rating: {st['mean_rating']:.2f}/5" if st["mean_rating"] is not None else "No ratings recorded."]
+    return "\n".join(out)
 
 
 def run_selftest():
@@ -442,6 +548,13 @@ def run_selftest():
           f"OLS=({o3['m']:.4f},{o3['c']:.4f}) GD=({m:.4f},{c:.4f})")
     o4 = RM.ols([2.0, 2.0, 2.0], [1.0, 2.0, 3.0])
     check("degenerate x (all equal) handled", o4["m"] == 0.0 and abs(o4["c"] - 2.0) < 1e-12)
+    ev = [dict(kind="pre", session="s1", player="A", score=1, total=5), dict(kind="post", session="s1", player="A", score=4, total=5, rating=5, comment="clear"),
+          dict(kind="pre", session="s2", player="B", score=2, total=5), dict(kind="post", session="s2", player="B", score=3, total=5, rating=3)]
+    st = evidence_stats(ev)
+    check("evidence_stats pairs sessions and averages the gain", len(st["pairs"]) == 2 and abs(st["mean_gain"] - 2.0) < 1e-12
+          and abs(st["mean_pre"] - 1.5) < 1e-12 and abs(st["mean_post"] - 3.5) < 1e-12, str(st["mean_gain"]))
+    check("check-up questions are well formed", all(len(o) >= 3 and 0 <= c < len(o) for _, o, c in CHECK_QUESTIONS))
+    check("every world has learning objectives", len(LEARNING_OBJECTIVES) == N_STAGES and all(LEARNING_OBJECTIVES))
     print("\nALL SELF-TESTS PASSED" if all(results) else "\nSOME SELF-TESTS FAILED")
     return all(results)
 
@@ -1685,12 +1798,14 @@ class Stage1(Stage):
     """WORLD 1 - data collection, variables, positive linear relationship."""
     index = 0
     X_NAME, Y_NAME = "Kyber crystal charge time", "Lightsaber force output"
+    X_NEXT = N_CLEAN + 1  # the unseen sample the player must PREDICT before charging it
 
     def enter(self):
         g = self.game
         self.d = g.clean
         self.phase, self.hint_n = 0, {}
         self.collected, self.pop = {}, {}
+        self.pred_var, self.pred_ok, self.pred_tries = tk.DoubleVar(value=0.0), False, 0
         self.q = [
             [(f"{self.X_NAME} (seconds)", True, ""),
              (f"{self.Y_NAME} (force units)", False,
@@ -1711,15 +1826,19 @@ class Stage1(Stage):
 
     def progress(self):
         extra = len(self.collected) / N_CLEAN if self.phase == 2 else 0
-        return clamp((self.phase + extra) / 4, 0, 1)
+        return clamp((self.phase + extra) / 5, 0, 1)
 
     def refresh(self):
         g = self.game
         g.clear_controls()
         f = g.stage_ctrl
-        if self.phase in (0, 1, 3):
-            qi = {0: 0, 1: 1, 3: 2}[self.phase]
+        if self.phase in (0, 1, 4):
+            qi = {0: 0, 1: 1, 4: 2}[self.phase]
             choice_buttons(g, f, self.q[qi], self.answer)
+        elif self.phase == 3:
+            self.pred_scale = g.mk_scale(f, f"Your prediction of Y at X = {self.X_NEXT}", 0, 80, 0.5, self.pred_var, None, 330)
+            self.pred_scale.pack(side="left", padx=6)
+            g.mk_button(f, f"Charge crystal X={self.X_NEXT}!", self.check_prediction, GREEN).pack(side="left", padx=6, pady=6)
         else:
             g.mk_button(f, "Collect next sample (C)", self.collect_next, GREEN).pack(side="left", padx=6, pady=6)
             tk.Label(f, text="...or walk Yoda into a glowing crystal", bg=PANEL, fg=DIM, font=FONTS["ui"]).pack(side="left", padx=8)
@@ -1742,6 +1861,12 @@ class Stage1(Stage):
                 ("h", "Collect six samples"),
                 ("p", "Each sample is one data point (X, Y): charge a crystal for X seconds, measure the force Y. Collect X = 1, 2, 3, 4, 5, 6. Every sample adds a point to the live graph."),
                 ("tip", "Walk Yoda into the glowing crystals (they are labelled X=1 ... X=6) or press C.")])
+        elif self.phase == 3:
+            g.set_lesson(title, [
+                ("h", "Experiment: predict before you measure"),
+                ("p", f"Look at the table: how does Y change each time X goes up by 1? Use that pattern to PREDICT the force for a crystal charged X = {self.X_NEXT} seconds - a point you have not measured yet."),
+                ("p", "If your prediction is close, you have discovered the rule hidden in the data. If not, the droid tells you which way you missed."),
+                ("tip", f"Set the slider to your prediction, then charge crystal X = {self.X_NEXT}.")])
         else:
             g.set_lesson(title, [
                 ("h", "Discover the trend"),
@@ -1756,7 +1881,9 @@ class Stage1(Stage):
                     "It is the lightsaber force output."],
                 2: ["Touch each glowing crystal, or press C, to measure X = 1 ... 6.",
                     "Crystals on high platforms need a jump (Space)."],
-                3: ["Compare neighbouring samples: does Y grow or shrink when X grows by 1?",
+                3: ["Check the last column of the table: Y changes by the same amount every step. Add one more step to the last Y.",
+                    f"Y went from {self.d['ys'][-2]:g} to {self.d['ys'][-1]:g} between X={N_CLEAN - 1} and X={N_CLEAN}. Do the same jump once more."],
+                4: ["Compare neighbouring samples: does Y grow or shrink when X grows by 1?",
                     "Each step to the right makes Y larger."]}[phase]
 
     def answer(self, ok, fb):
@@ -1766,9 +1893,9 @@ class Stage1(Stage):
             return
         g.add_score(100)
         g.droid.mood("happy", 70)
-        if self.phase == 3:
+        if self.phase == 4:
             g.good("Correct! X and Y rise together - a positive linear relationship.")
-            self.phase = 4
+            self.phase = 5
             g.complete_stage()
             return
         g.good("Correct!")
@@ -1788,6 +1915,29 @@ class Stage1(Stage):
     def primary_action(self):
         if self.phase == 2:
             self.collect_next()
+        elif self.phase == 3:
+            self.check_prediction()
+
+    def check_prediction(self):
+        """Discovery step: the player predicts an unseen sample; the crystal then reveals the computed truth."""
+        g = self.game
+        if self.phase != 3:
+            return
+        true_y = self.d["m_true"] * self.X_NEXT + self.d["c_true"]
+        step = self.d["ys"][1] - self.d["ys"][0]
+        guess = self.pred_var.get()
+        self.pred_tries += 1
+        if abs(guess - true_y) <= 0.5 * abs(step) + 1e-9:
+            self.collected[self.X_NEXT] = true_y
+            self.pop[self.X_NEXT] = g.frame
+            self.pred_ok, self.phase = True, 4
+            g.add_score(150)
+            g.droid.mood("happy", 80)
+            g.good(f"Prediction confirmed! Crystal X = {self.X_NEXT} gave Y = {true_y:g}. The rule you found: every +1 in X adds {step:g} to Y.")
+            self.refresh()
+        else:
+            word = "too HIGH" if guess > true_y else "too LOW"
+            g.wrong(f"Your prediction {guess:g} is {word}. Look at how much Y grows from one sample to the next and extend the pattern one more step.", 4)
 
     def collect(self, xv):
         g = self.game
@@ -1813,7 +1963,7 @@ class Stage1(Stage):
 
     def draw_graph(self, gv):
         d = self.d
-        gv.setup(0, 7, 0, max(d["ys"]) * 1.2)
+        gv.setup(0, self.X_NEXT + 1, 0, (max(d["ys"]) + abs(d["ys"][1] - d["ys"][0])) * 1.2)
         gv.axes("X = ??? (input)" if self.phase < 1 else f"X (input): {self.X_NAME} (s)",
                 "Y = ??? (output)" if self.phase < 2 else "Y (output): force (units)",
                 "Live data graph")
@@ -1831,6 +1981,11 @@ class Stage1(Stage):
             gv.seg(xb, ya, xb, yb, ORANGE, 3)
             gv.txt(xa + 0.5, ya, "+1 X", GREEN, "n", dy=-4)
             gv.txt(xb, (ya + yb) / 2, f" +{yb - ya:g} Y", ORANGE, "w")
+        if self.phase == 3:
+            gx, gy = self.X_NEXT, self.pred_var.get()
+            gv.seg(gx, 0, gx, gv.ymax, PINK, 2, (4, 4))
+            gv.dot(gx, gy, PINK, 7)
+            gv.txt(gx, gy, f"your prediction: {gy:g}", PINK, "e", dx=-12, dy=-12)
         if not pts:
             gv.cv.create_text(gv.w / 2, gv.h / 2, text="No samples yet", fill=DIM, font=FONTS["ui"])
 
@@ -1842,8 +1997,9 @@ class Stage1(Stage):
             lines.append(f"  {i}   {xv:5g}   {y:9.2f}   {'' if prev is None else f'{y - prev:+.2f}'}")
             prev = y
         lines.append("")
-        lines.append(f"Samples collected: {len(pts)} / {N_CLEAN}")
-        if len(pts) == N_CLEAN:
+        lines.append(f"Samples collected: {min(len(pts), N_CLEAN)} / {N_CLEAN}"
+                     + (f"   + predicted X = {self.X_NEXT} (tries: {self.pred_tries})" if self.pred_ok else ""))
+        if len(pts) >= N_CLEAN:
             diffs = [pts[i + 1][1] - pts[i][1] for i in range(len(pts) - 1)]
             lines.append(f"Every +1 in X changes Y by {RM.mean(diffs):+.2f}  ->  upward trend")
         return "\n".join(lines)
@@ -2492,7 +2648,7 @@ class Stage4(Stage):
         base = [("p", "Kuro hides his weak point in the FUTURE: an X value larger than any we ever measured. The fitted OLS line from World 3 is our crystal ball."),
                 ("eq", f"\u0177 = {self.m:.3f}\u00b7x + {self.c:.3f}"),
                 ("h", "Interpolation vs extrapolation"),
-                ("p", f"Training data covers X = {self.xs[0]:g} ... {self.xmax:g}. Predicting beyond that is EXTRAPOLATION - useful, but the further we go, the riskier it gets (noise is amplified and the trend may change).")]
+                ("p", f"Training data covers X = {self.xs[0]:g} ... {self.xmax:g}. Predicting beyond that is EXTRAPOLATION - useful, but the further we go, the riskier it gets (noise is amplified and the trend may change). Slide the aim and watch the purple band: it widens as you leave the data behind.")]
         if not self.locked:
             base.append(("tip", f"Step 1: slide the aim to the target X = {self.xf:g} (pink dashed line)."))
         else:
@@ -2528,6 +2684,16 @@ class Stage4(Stage):
     def hover_points(self):
         return list(zip(self.xs, self.ys))
 
+    def _pm(self, x):
+        """Approximate 95% prediction half-width at x: 1.96*s*sqrt(1 + 1/n + (x-xbar)^2/Sxx), computed from this dataset."""
+        n = len(self.xs)
+        if n < 3:
+            return 0.0
+        xbar = RM.mean(self.xs)
+        sxx = sum((v - xbar) ** 2 for v in self.xs)
+        s = math.sqrt(RM.sse(self.xs, self.ys, self.m, self.c) / (n - 2))
+        return 1.96 * s * math.sqrt(1 + 1.0 / n + ((x - xbar) ** 2 / sxx if sxx > 1e-12 else 0.0))
+
     def draw_graph(self, gv):
         xr = self.xf + 4
         ytop = max(max(self.ys), self.m * xr + self.c) * 1.1
@@ -2536,6 +2702,13 @@ class Stage4(Stage):
         cv = gv.cv
         cv.create_rectangle(gv.px(self.xmax), gv.py(ytop), gv.px(xr), gv.py(0), fill="#3a2f7a", outline="", stipple="gray25")
         cv.create_text(gv.px((self.xmax + xr) / 2), gv.PT + 18, text="UNSEEN TERRITORY (future)", fill="#c9b8ff", font=FONTS["small"])
+        up, lo = [], []
+        for i in range(41):
+            bx = self.xs[0] + (xr - self.xs[0]) * i / 40
+            by, pm = self.m * bx + self.c, self._pm(bx)
+            up += [gv.px(bx), clamp(gv.py(by + pm), gv.PT, gv.h - gv.PB)]
+            lo = [gv.px(bx), clamp(gv.py(by - pm), gv.PT, gv.h - gv.PB)] + lo
+        cv.create_polygon(*(up + lo), fill="#6b5cff", outline="#9a8cff", stipple="gray50")
         gv.line(self.m, self.c, GOLD, 3, x0=0, x1=self.xmax)
         gv.line(self.m, self.c, GOLD, 2, (5, 4), x0=self.xmax, x1=xr)
         for x, y in zip(self.xs, self.ys):
@@ -2555,7 +2728,7 @@ class Stage4(Stage):
             gv.ring(self.xf, self.yhat, 14, "#ffffff", 3)
             gv.dot(self.xf, self.yhat, RED, 6)
         gv.legend([(GOLD, "fitted model (solid = trained, dashed = extrapolated)", None), ("#ffe9a8", "training data", None),
-                   (col, "your crosshair", None)])
+                   ("#9a8cff", "approx. 95% prediction band", None), (col, "your crosshair", None)])
 
     def telemetry(self):
         ax = self.aim_var.get()
@@ -2563,7 +2736,9 @@ class Stage4(Stage):
         L = ["FITTED MODEL (OLS from World 3)", f"  \u0177 = {self.m:.4f}\u00b7x + {self.c:.4f}",
              f"  training X range: {self.xs[0]:g} ... {self.xmax:g}   (n = {len(self.xs)})", "",
              "CROSSHAIR", f"  x = {ax:g}", f"  \u0177 = m\u00b7x + c = {self.m:.4f}\u00d7{ax:g} + {self.c:.4f} = {ay:.3f}",
-             f"  {'EXTRAPOLATION: x is beyond all training data' if ax > self.xmax else 'interpolation: x lies inside the training range'}", "",
+             f"  {'EXTRAPOLATION: x is beyond all training data' if ax > self.xmax else 'interpolation: x lies inside the training range'}",
+             f"  approx. 95% range for a new Y here: {ay - self._pm(ax):.2f} ... {ay + self._pm(ax):.2f}   (+/-{self._pm(ax):.2f})",
+             f"  uncertainty +/-{self._pm(self.xmax):.2f} at the last training X={self.xmax:g}  vs  +/-{self._pm(self.xf):.2f} at the target X={self.xf:g}", "",
              f"TARGET  X = {self.xf:g}   (greater than every training X: {self.xf > self.xmax})"]
         dm = self.game.droid_model
         if dm:
@@ -2574,6 +2749,69 @@ class Stage4(Stage):
         L += ["", f"Training MSE of the model: {self.mdl['mse']:.4f}",
               "Remember: the farther beyond the data we predict, the less we should trust it."]
         return "\n".join(L)
+
+
+# --------------------------------------------------------------------------
+# Pre/post check-up dialog (evidence of learning + playtest feedback)
+# --------------------------------------------------------------------------
+class CheckupDialog:
+    """5-question concept check-up (pre or post) plus optional feedback; saved to the history JSON."""
+
+    def __init__(self, game, kind):
+        self.game, self.kind = game, kind
+        win = self.win = tk.Toplevel(game.root)
+        win.title("Warm-up check" if kind == "pre" else "Check-up and playtest feedback")
+        win.configure(bg=BG)
+        tk.Label(win, text="Warm-up (before you play)" if kind == "pre" else "Check-up (after you played)",
+                 bg=BG, fg=GOLD, font=FONTS["h"]).pack(anchor="w", padx=14, pady=(10, 0))
+        tk.Label(win, text="Answer what you can - guessing is fine. Results are saved locally to measure what the game taught.",
+                 bg=BG, fg=DIM, font=FONTS["small"], wraplength=620, justify="left").pack(anchor="w", padx=14)
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", padx=14, pady=4)
+        tk.Label(row, text="Name / nickname:", bg=BG, fg=FG, font=FONTS["ui"]).pack(side="left")
+        self.name_var = tk.StringVar(value=game.player_name)
+        tk.Entry(row, textvariable=self.name_var, width=22, font=FONTS["ui"]).pack(side="left", padx=6)
+        self.vars = []
+        for qi, (prompt, opts, _ok) in enumerate(CHECK_QUESTIONS):
+            tk.Label(win, text=f"{qi + 1}. {prompt}", bg=BG, fg=FG, font=FONTS["ui"], wraplength=640,
+                     justify="left").pack(anchor="w", padx=14, pady=(6, 0))
+            v = tk.IntVar(value=-1)
+            self.vars.append(v)
+            order = list(range(len(opts)))
+            random.shuffle(order)
+            for oi in order:
+                tk.Radiobutton(win, text=opts[oi], variable=v, value=oi, bg=BG, fg=FG, selectcolor="#232857",
+                               activebackground=BG, activeforeground=GOLD, anchor="w", justify="left",
+                               font=FONTS["small"], takefocus=0).pack(anchor="w", padx=30)
+        self.rating_var, self.comment_var = tk.DoubleVar(value=4), tk.StringVar()
+        if kind == "post":
+            game.mk_scale(win, "How much did the game help you understand regression? (1 = not at all, 5 = a lot)",
+                          1, 5, 1, self.rating_var, None, 440).pack(anchor="w", padx=14, pady=(6, 0))
+            tk.Label(win, text="What did you learn, or what was confusing?", bg=BG, fg=FG,
+                     font=FONTS["small"]).pack(anchor="w", padx=14)
+            tk.Entry(win, textvariable=self.comment_var, width=80, font=FONTS["ui"]).pack(anchor="w", padx=14, pady=2)
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(pady=8)
+        game.mk_button(btns, "Submit", self.submit, GREEN).pack(side="left", padx=6)
+        game.mk_button(btns, "Skip", self.close, "#555a80").pack(side="left", padx=6)
+        win.protocol("WM_DELETE_WINDOW", self.close)
+
+    def submit(self):
+        g = self.game
+        correct = [v.get() == CHECK_QUESTIONS[i][2] for i, v in enumerate(self.vars)]
+        name = self.name_var.get().strip()[:40]
+        entry = dict(time=datetime.now().isoformat(timespec="seconds"), kind=self.kind, session=g.session_id,
+                     player=name, score=sum(correct), total=len(correct), correct=correct)
+        if self.kind == "post":
+            entry.update(rating=int(self.rating_var.get()), comment=self.comment_var.get().strip()[:500],
+                         stages_cleared=g.stages_done, victory=g.mode == "victory")
+        g.player_name = name
+        g.history.add_evidence(entry)
+        self.close()
+        g.on_checkup_done(entry)
+
+    def close(self):
+        self.game.close_checkup()
 
 
 # --------------------------------------------------------------------------
@@ -2588,7 +2826,7 @@ CONTROLS
   C .................... collect next sample (World 1)
   H .................... ask the Learning Droid for a hint
   Enter ................ confirm / start / retry
-  P pause    T tutorial    R restart    Esc close this window
+  P pause    T tutorial    K check-up    R restart    Esc close this window
 
 PLATFORM FUN
   Coins +10, gems +25, question blocks +50 (+5 HP and a droid hint). Jump over hazards (-8 HP).
@@ -2611,6 +2849,16 @@ HISTORY
   a local JSON file next to the game. Each new game uses fresh random data; old parameters are never
   reused - history is only used to compare performance and tune difficulty.
 """
+TUTORIAL += "\nLEARNING OBJECTIVES\n" + "".join(
+    f"  World {i + 1} ({WORLDS[i]['name']}):\n" + "".join(f"    - {o}\n" for o in objs)
+    for i, objs in enumerate(LEARNING_OBJECTIVES)) + (
+    "\nLEARN BY EXPERIMENTING\n"
+    "  You do not just read the ideas: you predict an unseen sample (World 1), search for c and m (World 2),\n"
+    "  watch MSE react to your sliders and try learning rates that converge or diverge (World 3), and watch\n"
+    "  the uncertainty band widen as you extrapolate (World 4).\n"
+    "\nCHECK-UP (EVIDENCE OF LEARNING)\n"
+    "  Press K for a 5-question concept check before and after playing, plus optional feedback.\n"
+    "  Results are saved in the history file; run  python master_yoda_vs_kuro.py --report  to summarise them.\n")
 
 
 # --------------------------------------------------------------------------
@@ -2636,6 +2884,9 @@ class GameApp:
         self.err_count = 0
         self.tut = None
         self._tut_prev = None
+        self.chk = self._chk_prev = None
+        self.player_name, self.session_id = "", ""
+        self.pre_done = self.post_done = self.skip_pre_prompt = False
         self._lesson_key = self._tel_last = None
         self._build_ui()
         self.arena = Arena(self, self.arena_cv)
@@ -2682,6 +2933,7 @@ class GameApp:
                          ("eq", dict(font=FONTS["mono_b"], foreground=GOLD, background="#232857", lmargin1=10, lmargin2=10,
                                      spacing1=3, spacing3=3)),
                          ("tip", dict(font=FONTS["ui_b"], foreground=GREEN, spacing1=4)),
+                         ("obj", dict(font=FONTS["small"], foreground="#b8c0ee", spacing3=4)),
                          ("warn", dict(font=FONTS["ui_b"], foreground=ORANGE))):
             self.lesson.tag_configure(name, **kw)
         bottom = tk.Frame(r, bg=PANEL)
@@ -2696,6 +2948,7 @@ class GameApp:
         self.mk_button(glob, "Tutorial (T)", self.show_tutorial, "#555a80").grid(row=1, column=0, padx=3, pady=2, sticky="ew")
         self.mk_button(glob, "Hint (H)", self.hint, "#1e8fb8").grid(row=1, column=1, padx=3, pady=2, sticky="ew")
         self.mk_button(glob, "Pause (P)", self.toggle_pause, "#555a80").grid(row=2, column=0, columnspan=2, padx=3, pady=2, sticky="ew")
+        self.mk_button(glob, "Check-up (K)", self.open_checkup, "#7a3cc4").grid(row=3, column=0, columnspan=2, padx=3, pady=2, sticky="ew")
 
     def _text(self, parent, height, mono=False):
         t = tk.Text(parent, wrap="word" if not mono else "none", height=height, bg="#12142a", fg=FG, bd=0, padx=8, pady=6,
@@ -2730,6 +2983,10 @@ class GameApp:
 
     # ----- lesson / feedback / telemetry -----
     def set_lesson(self, title, blocks):
+        blocks = list(blocks)
+        if self.stage is not None and self.mode in ("play", "paused", "cutscene"):
+            objs = LEARNING_OBJECTIVES[self.stage.index]
+            blocks.insert(0, ("obj", "Learning objectives: " + "   ".join(f"({i + 1}) {o}" for i, o in enumerate(objs))))
         key = (title, tuple(blocks))
         if key == self._lesson_key:
             return
@@ -2825,8 +3082,12 @@ class GameApp:
         self.arena.yoda.victory = False
         self.arena.yoda.auto = False
         self.arena.curtain = None
+        self.session_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + "%04d" % random.randint(0, 9999)
+        self.pre_done = self.post_done = False
         self.start_stage(0)
         self.info(self.profile["note"])
+        if not self.skip_pre_prompt:
+            self.root.after(1500, self._offer_precheck)
 
     def start_stage(self, idx, retry=False):
         if self.stage:
@@ -2882,12 +3143,14 @@ class GameApp:
         if self.droid_model:
             lines.append(f"Learning Droid (gradient descent): y_hat = {self.droid_model['m']:.3f}x + {self.droid_model['c']:.3f}"
                          f"   (MSE {self.droid_model['mse']:.3f})")
-        lines += self.history.summary_lines()[1:4]
+        lines += self.history.summary_lines()[1:3]
+        lines.append("Press K for the 5-question check-up and playtest feedback.")
         self.victory_lines = lines
         self.history.save()
         self.clear_controls()
         self.good("Victory! Kuro is defeated. Press Enter to play again.")
         self._sync_main_button()
+        self.root.after(3000, self._offer_postcheck)
 
     def defeat(self):
         if self.mode != "play":
@@ -2948,6 +3211,9 @@ class GameApp:
         t = tk.Text(win, wrap="word", width=92, height=34, bg="#12142a", fg=FG, font=FONTS["mono"], padx=12, pady=10, bd=0)
         t.insert("end", TUTORIAL)
         t.config(state="disabled")
+        sb = tk.Scrollbar(win, command=t.yview, takefocus=0)
+        t.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y", pady=8)
         t.pack(fill="both", expand=True, padx=8, pady=8)
         self.mk_button(win, "Close (Esc)", self.close_tutorial, GREEN).pack(pady=(0, 8))
         win.protocol("WM_DELETE_WINDOW", self.close_tutorial)
@@ -2964,6 +3230,63 @@ class GameApp:
         if self.mode == "paused" and self._tut_prev == "play":
             self.mode = "play"
         self.root.focus_set()
+
+    def _offer_precheck(self):
+        if self.pre_done or self.chk is not None or self.tut is not None or self.mode != "play":
+            return
+        if messagebox.askyesno("Warm-up check", "Take the optional 5-question warm-up (about 1 minute)?\n"
+                               "It lets the game measure what you learn. You can also press K at any time."):
+            self.open_checkup("pre")
+        else:
+            self.skip_pre_prompt = True
+
+    def _offer_postcheck(self):
+        if self.mode == "victory" and not self.post_done and self.chk is None and self.tut is None:
+            self.open_checkup("post")
+
+    def open_checkup(self, kind=None):
+        if self.chk is not None:
+            try:
+                self.chk.win.lift()
+                return
+            except tk.TclError:
+                self.chk = None
+        if self.tut is not None:
+            return
+        if self.mode == "title":
+            self.info("Start a game first - the check-up is tied to your play session.")
+            return
+        if kind is None:
+            kind = "post" if (self.pre_done or self.mode == "victory") else "pre"
+        self._chk_prev = self.mode
+        if self.mode == "play":
+            self.mode = "paused"
+        self.chk = CheckupDialog(self, kind)
+
+    def close_checkup(self):
+        if self.chk is not None:
+            try:
+                self.chk.win.destroy()
+            except tk.TclError:
+                pass
+            self.chk = None
+        if self.mode == "paused" and self._chk_prev == "play":
+            self.mode = "play"
+        self.root.focus_set()
+
+    def on_checkup_done(self, entry):
+        t = entry["total"]
+        if entry["kind"] == "pre":
+            self.pre_done = True
+            self.good(f"Warm-up saved: {entry['score']}/{t}. Now go and learn something!")
+            return
+        self.post_done = True
+        pre = next((e for e in reversed(self.history.data["evidence"])
+                    if e.get("kind") == "pre" and e.get("session") == self.session_id), None)
+        if pre:
+            self.good(f"Check-up saved: {pre['score']}/{t} before -> {entry['score']}/{t} after ({entry['score'] - pre['score']:+d}). Thank you for the feedback!")
+        else:
+            self.good(f"Check-up saved: {entry['score']}/{t}. (No warm-up this session, so no before/after comparison.)")
 
     def on_close(self):
         self.finish_attempt("abandoned")
@@ -2982,6 +3305,8 @@ class GameApp:
         if self._typing():
             return
         k = e.keysym.lower()
+        if self.chk is not None or (self.tut is not None and k != "escape"):
+            return
         job = self._rel.pop(k, None)
         if job:
             self.root.after_cancel(job)
@@ -2999,6 +3324,8 @@ class GameApp:
             self.hint()
         elif k == "t":
             self.show_tutorial()
+        elif k == "k":
+            self.open_checkup()
         elif k == "r":
             self.restart(True)
         elif k == "p":
@@ -3072,6 +3399,10 @@ class GameApp:
 def main():
     if "--selftest" in sys.argv:
         sys.exit(0 if run_selftest() else 1)
+    if "--report" in sys.argv:
+        files = [a for a in sys.argv[sys.argv.index("--report") + 1:] if not a.startswith("--")]
+        print(build_report(files or [str(HistoryStore().path)]))
+        sys.exit(0)
     if tk is None:
         print("Tkinter is not available in this Python installation. Install the 'python3-tk' package "
               "(Linux) or use the python.org installer, then run again.")
